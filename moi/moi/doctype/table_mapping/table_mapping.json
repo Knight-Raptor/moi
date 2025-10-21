@@ -5,7 +5,9 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "mapping"
+  "mapping",
+  "section_break_imzv",
+  "check_submit"
  ],
  "fields": [
   {
@@ -13,12 +15,23 @@
    "fieldtype": "Table",
    "label": "Mapping",
    "options": "Table Mapping Setting"
+  },
+  {
+   "fieldname": "section_break_imzv",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "0",
+   "description": "Checked If want to make stock entry submit",
+   "fieldname": "check_submit",
+   "fieldtype": "Check",
+   "label": "Check Submit"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-10-18 13:58:27.727693",
+ "modified": "2025-10-21 14:43:44.986512",
  "modified_by": "Administrator",
  "module": "MOI",
  "name": "Table Mapping",
