@@ -1,6 +1,6 @@
 import frappe
 from frappe import _
-from frappe.utils import nowdate, cint
+from frappe.utils import nowdate, cint, flt
 
 @frappe.whitelist()
 def get_items(item_group=None, item_code=None, barcode=None):
@@ -57,31 +57,205 @@ def get_items(item_group=None, item_code=None, barcode=None):
 
 @frappe.whitelist()
 def get_item_details(item_code):
-    """Get item details including batch info and default warehouse"""
+    """Get item details including batch info, default warehouse, and default UOM"""
     item = frappe.get_doc("Item", item_code)
     
     # Get default warehouse from mapping using your existing logic
     mapping = get_mapping(item_code)
     warehouse = mapping.get("warehouse") if mapping else None
     
-    # Get valuation rate from item price or valuation rate field
-    valuation_rate = frappe.db.get_value("Item Price", 
-        {"item_code": item_code}, 
-        "price_list_rate") or item.valuation_rate or 0
+    # Get default UOM
+    default_uom = item.stock_uom
+    
+    # Get valuation rate - prioritize Item Price for stock UOM
+    valuation_rate = 0
+    
+    # Try Item Price for stock UOM first
+    item_price_stock_uom = frappe.db.sql("""
+        SELECT price_list_rate 
+        FROM `tabItem Price` 
+        WHERE item_code = %s 
+        AND uom = %s
+        AND price_list_rate > 0
+        ORDER BY valid_from DESC
+        LIMIT 1
+    """, (item_code, default_uom), as_dict=True)
+    
+    if item_price_stock_uom:
+        valuation_rate = item_price_stock_uom[0].price_list_rate
+    else:
+        # Fallback to any item price or valuation rate
+        valuation_rate = frappe.db.get_value("Item Price", 
+            {"item_code": item_code}, 
+            "price_list_rate") or item.valuation_rate or 0
     
     # Get first barcode from Item Barcode child table
     barcode = frappe.db.get_value("Item Barcode", 
         {"parent": item_code}, 
         "barcode")
-    
-    frappe.log_error(f"Barcode for {item_code}: {barcode}", "Debug Barcode")  # Debug log
 
     return {
         "warehouse": warehouse,
         "valuation_rate": valuation_rate,
         "has_batch_no": item.has_batch_no,
         "item_name": item.item_name,
-        "barcode": barcode or ""
+        "barcode": barcode or "",
+        "default_uom": default_uom
+    }
+
+
+
+@frappe.whitelist()
+def get_single_item_uoms(doctype, txt, searchfield, start, page_len, filters):
+    """Get UOMs defined for a specific item (must return list of lists for Link field)"""
+    item_code = filters.get("item_code")
+    if not item_code:
+        return []
+
+    # Get stock UOM (always available)
+    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
+    uoms = [[stock_uom]]
+
+    # Get additional UOMs from UOM Conversion Detail
+    additional_uoms = frappe.db.sql("""
+        SELECT uom
+        FROM `tabUOM Conversion Detail`
+        WHERE parent = %s AND uom != %s
+    """, (item_code, stock_uom))
+
+    uoms.extend(additional_uoms)
+
+    # ✅ Must return list of lists, e.g. [["Box"], ["Set"]]
+    return uoms
+
+
+
+
+@frappe.whitelist()
+def get_item_uoms(*args, **kwargs):
+    """
+    Handles both:
+      1. Direct frappe.call({ args: { item_code } })
+      2. Query calls from get_query() with (doctype, txt, searchfield, start, page_len, filters)
+    """
+    # Case 1: Called manually via frappe.call
+    item_code = kwargs.get("item_code")
+
+    # Case 2: Called as query function
+    if not item_code and len(args) >= 6:
+        filters = args[5]
+        item_code = filters.get("item_code") if filters else None
+
+    if not item_code:
+        return []
+
+    # Get stock UOM (always available)
+    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
+    uoms = [{"uom": stock_uom}]
+
+    # Get additional UOMs from UOM Conversion Detail
+    additional_uoms = frappe.db.sql("""
+        SELECT uom 
+        FROM `tabUOM Conversion Detail` 
+        WHERE parent = %s AND uom != %s
+    """, (item_code, stock_uom), as_dict=True)
+
+    uoms.extend(additional_uoms)
+
+    return uoms
+
+
+
+@frappe.whitelist()
+def get_price_for_uom(item_code, uom):
+    """Get price/valuation rate for a specific UOM - prioritizes Item Price for selected UOM"""
+    item = frappe.get_doc("Item", item_code)
+    stock_uom = item.stock_uom
+    
+    # Get conversion factor for the selected UOM
+    conversion_factor = 1
+    if uom != stock_uom:
+        conversion = frappe.db.get_value("UOM Conversion Detail", 
+            {"parent": item_code, "uom": uom}, 
+            "conversion_factor")
+        if conversion:
+            conversion_factor = flt(conversion)
+    
+    # PRIORITY 1: Check if Item Price exists for this specific UOM
+    item_price_for_uom = frappe.db.sql("""
+        SELECT price_list_rate 
+        FROM `tabItem Price` 
+        WHERE item_code = %s 
+        AND uom = %s
+        AND price_list_rate > 0
+        ORDER BY valid_from DESC
+        LIMIT 1
+    """, (item_code, uom), as_dict=True)
+    
+    if item_price_for_uom:
+        # Direct price found for this UOM - use it as is
+        return {
+            "price": item_price_for_uom[0].price_list_rate,
+            "conversion_factor": conversion_factor,
+            "source": "Item Price (UOM-specific)"
+        }
+    
+    # PRIORITY 2: Get base rate (in stock UOM) and apply conversion
+    base_rate = 0
+    source = ""
+    
+    # Try to get from latest Stock Ledger Entry (stock UOM)
+    latest_sle = frappe.db.sql("""
+        SELECT valuation_rate 
+        FROM `tabStock Ledger Entry` 
+        WHERE item_code = %s 
+        AND valuation_rate > 0
+        ORDER BY posting_date DESC, posting_time DESC 
+        LIMIT 1
+    """, (item_code,), as_dict=True)
+    
+    if latest_sle:
+        base_rate = latest_sle[0].valuation_rate
+        source = "Stock Ledger Entry"
+    else:
+        # Try Item Price (stock UOM or any UOM)
+        item_price = frappe.db.sql("""
+            SELECT price_list_rate, uom
+            FROM `tabItem Price` 
+            WHERE item_code = %s 
+            AND price_list_rate > 0
+            ORDER BY 
+                CASE WHEN uom = %s THEN 0 ELSE 1 END,
+                valid_from DESC
+            LIMIT 1
+        """, (item_code, stock_uom), as_dict=True)
+        
+        if item_price:
+            base_rate = item_price[0].price_list_rate
+            source = "Item Price"
+            
+            # If the found price is for a different UOM, convert it to stock UOM first
+            price_uom = item_price[0].uom
+            if price_uom != stock_uom:
+                price_uom_conversion = frappe.db.get_value("UOM Conversion Detail", 
+                    {"parent": item_code, "uom": price_uom}, 
+                    "conversion_factor")
+                if price_uom_conversion:
+                    # Convert price to stock UOM base
+                    base_rate = base_rate / flt(price_uom_conversion)
+        else:
+            # Fallback to item's valuation_rate field
+            base_rate = item.valuation_rate or 0
+            source = "Item Valuation Rate"
+    
+    # Calculate price for the selected UOM
+    # If conversion_factor = 2 (1 Box = 2 Units), price per Box = base_rate * 2
+    price = flt(base_rate) * flt(conversion_factor)
+    
+    return {
+        "price": price,
+        "conversion_factor": conversion_factor,
+        "source": source
     }
 
 
@@ -115,11 +289,7 @@ def get_mapping(item_code):
 
 def get_submit_setting():
     """Get submit setting from Table Mapping doctype"""
-    # Get the check_submit field from Table Mapping doctype
     submit_setting = frappe.db.get_value("Table Mapping", None, "check_submit")
-
-    # Debug log to see what value we're getting
-    frappe.log_error(f"Submit setting raw value: {submit_setting}, Type: {type(submit_setting)}", "Debug Submit Setting")
 
     # Convert to integer safely (handles '0', '1', None, etc.)
     try:
@@ -131,11 +301,10 @@ def get_submit_setting():
     return submit_setting == 1
 
 
-
 @frappe.whitelist()
 def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None, 
                      target_warehouse=None, department=None, batch_no=None, 
-                     batch_id=None, manufacturing_date=None, expiry_date=None):
+                     batch_id=None, manufacturing_date=None, expiry_date=None, uom=None):
     """Create Stock Entry based on operation type"""
     
     # Map operation type to stock entry purpose
@@ -149,6 +318,22 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     if not purpose:
         frappe.throw(_("Invalid operation type"))
     
+    # Get item details for stock UOM
+    item = frappe.get_doc("Item", item_code)
+    stock_uom = item.stock_uom
+    
+    # Get conversion factor if UOM is different from stock UOM
+    conversion_factor = 1
+    if uom and uom != stock_uom:
+        conversion = frappe.db.get_value("UOM Conversion Detail", 
+            {"parent": item_code, "uom": uom}, 
+            "conversion_factor")
+        if conversion:
+            conversion_factor = flt(conversion)
+    
+    # Calculate quantity in stock UOM
+    stock_qty = flt(qty) * flt(conversion_factor)
+    
     # Create Stock Entry
     stock_entry = frappe.new_doc("Stock Entry")
     stock_entry.stock_entry_type = purpose
@@ -161,11 +346,12 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     # Prepare item details
     item_dict = {
         "item_code": item_code,
-        "qty": qty,
-        "basic_rate": price,
-        "conversion_factor": 1,
-        "transfer_qty": qty,
-        "uom": frappe.db.get_value("Item", item_code, "stock_uom")
+        "qty": stock_qty,  # Stock quantity
+        "basic_rate": flt(price) / flt(conversion_factor) if conversion_factor else flt(price),  # Rate per stock UOM
+        "conversion_factor": conversion_factor,
+        "transfer_qty": stock_qty,
+        "uom": uom or stock_uom,
+        "stock_uom": stock_uom
     }
     
     # Handle batch operations
@@ -204,7 +390,7 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
 
 @frappe.whitelist()
 def get_bulk_item_details(item_codes):
-    """Get details for multiple items including latest valuation rate"""
+    """Get details for multiple items including latest valuation rate and default UOM"""
     import json
     if isinstance(item_codes, str):
         item_codes = json.loads(item_codes)
@@ -212,38 +398,72 @@ def get_bulk_item_details(item_codes):
     items_data = []
     for item_code in item_codes:
         item = frappe.get_doc("Item", item_code)
+        stock_uom = item.stock_uom
         
-        # Get latest valuation rate from multiple sources (in priority order)
+        # Get latest valuation rate - prioritize Item Price for stock UOM
         valuation_rate = 0
         
-        # 1. Try to get from latest Stock Ledger Entry
-        latest_sle = frappe.db.sql("""
-            SELECT valuation_rate 
-            FROM `tabStock Ledger Entry` 
+        # 1. Try to get Item Price for stock UOM first
+        item_price_stock_uom = frappe.db.sql("""
+            SELECT price_list_rate 
+            FROM `tabItem Price` 
             WHERE item_code = %s 
-            AND valuation_rate > 0
-            ORDER BY posting_date DESC, posting_time DESC 
+            AND uom = %s
+            AND price_list_rate > 0
+            ORDER BY valid_from DESC
             LIMIT 1
-        """, (item_code,), as_dict=True)
+        """, (item_code, stock_uom), as_dict=True)
         
-        if latest_sle:
-            valuation_rate = latest_sle[0].valuation_rate
+        if item_price_stock_uom:
+            valuation_rate = item_price_stock_uom[0].price_list_rate
         else:
-            # 2. Try Item Price (Buying)
-            item_price = frappe.db.get_value("Item Price", 
-                {"item_code": item_code, "buying": 1}, 
-                "price_list_rate")
+            # 2. Try to get from latest Stock Ledger Entry
+            latest_sle = frappe.db.sql("""
+                SELECT valuation_rate 
+                FROM `tabStock Ledger Entry` 
+                WHERE item_code = %s 
+                AND valuation_rate > 0
+                ORDER BY posting_date DESC, posting_time DESC 
+                LIMIT 1
+            """, (item_code,), as_dict=True)
             
-            if item_price:
-                valuation_rate = item_price
+            if latest_sle:
+                valuation_rate = latest_sle[0].valuation_rate
             else:
-                # 3. Fallback to item's valuation_rate field
-                valuation_rate = item.valuation_rate or 0
+                # 3. Try any Item Price (any UOM) and convert to stock UOM
+                any_item_price = frappe.db.sql("""
+                    SELECT price_list_rate, uom
+                    FROM `tabItem Price` 
+                    WHERE item_code = %s 
+                    AND price_list_rate > 0
+                    ORDER BY valid_from DESC
+                    LIMIT 1
+                """, (item_code,), as_dict=True)
+                
+                if any_item_price:
+                    price = any_item_price[0].price_list_rate
+                    price_uom = any_item_price[0].uom
+                    
+                    # Convert to stock UOM if different
+                    if price_uom != stock_uom:
+                        conversion = frappe.db.get_value("UOM Conversion Detail", 
+                            {"parent": item_code, "uom": price_uom}, 
+                            "conversion_factor")
+                        if conversion:
+                            valuation_rate = price / flt(conversion)
+                        else:
+                            valuation_rate = price
+                    else:
+                        valuation_rate = price
+                else:
+                    # 4. Fallback to item's valuation_rate field
+                    valuation_rate = item.valuation_rate or 0
         
         items_data.append({
             "item_code": item.name,
             "item_name": item.item_name,
-            "valuation_rate": valuation_rate
+            "valuation_rate": valuation_rate,
+            "default_uom": stock_uom
         })
     
     return items_data
@@ -252,7 +472,7 @@ def get_bulk_item_details(item_codes):
 @frappe.whitelist()
 def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
                           target_warehouse=None, department=None):
-    """Create bulk stock entries for multiple items with individual qty and price"""
+    """Create bulk stock entries for multiple items with individual qty, price, and UOM"""
     
     # Convert items from JSON string to list
     import json
@@ -279,15 +499,37 @@ def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
     if department:
         stock_entry.custom_department = department
     
-    # Add each item to the stock entry with its individual qty and price
+    # Add each item to the stock entry with its individual qty, price, and UOM
     for item in items:
+        item_code = item.get("item_code")
+        qty = flt(item.get("qty"))
+        price = flt(item.get("price"))
+        uom = item.get("uom")
+        
+        # Get item details for stock UOM
+        item_doc = frappe.get_doc("Item", item_code)
+        stock_uom = item_doc.stock_uom
+        
+        # Get conversion factor if UOM is different from stock UOM
+        conversion_factor = 1
+        if uom and uom != stock_uom:
+            conversion = frappe.db.get_value("UOM Conversion Detail", 
+                {"parent": item_code, "uom": uom}, 
+                "conversion_factor")
+            if conversion:
+                conversion_factor = flt(conversion)
+        
+        # Calculate quantity in stock UOM
+        stock_qty = qty * conversion_factor
+        
         item_dict = {
-            "item_code": item.get("item_code"),
-            "qty": item.get("qty"),
-            "basic_rate": item.get("price"),
-            "conversion_factor": 1,
-            "transfer_qty": item.get("qty"),
-            "uom": frappe.db.get_value("Item", item.get("item_code"), "stock_uom")
+            "item_code": item_code,
+            "qty": stock_qty,  # Stock quantity
+            "basic_rate": price / conversion_factor if conversion_factor else price,  # Rate per stock UOM
+            "conversion_factor": conversion_factor,
+            "transfer_qty": stock_qty,
+            "uom": uom or stock_uom,
+            "stock_uom": stock_uom
         }
         
         # Set warehouses based on operation type

@@ -87,7 +87,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			},
 			callback: function (r) {
 				if (r.message) {
-					selected_items.clear();
 					render_table(r.message);
 					update_bulk_toolbar();
 				}
@@ -207,13 +206,11 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 
 	function update_row_buttons_state() {
 		if (selected_items.size > 0) {
-			// Grey out/disable row action buttons when in bulk mode
 			$('.action-buttons button').not('.print-btn').css({
 				'opacity': '0.5',
 				'pointer-events': 'none'
 			});
 		} else {
-			// Enable row action buttons when not in bulk mode
 			$('.action-buttons button').css({
 				'opacity': '1',
 				'pointer-events': 'auto'
@@ -238,152 +235,258 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 	}
 
 	function open_bulk_popup(type, item_codes) {
-		frappe.call({
-			method: 'moi.moi.page.stock_operations.stock_operations.get_bulk_item_details',
-			args: { item_codes },
-			callback: function(r) {
-				if (!r.message) return;
-				let items_data = r.message;
+	frappe.call({
+		method: 'moi.moi.page.stock_operations.stock_operations.get_bulk_item_details',
+		args: { item_codes },
+		callback: function (r) {
+			if (!r.message) return;
+			let items_data = r.message;
 
-				// First, auto-fetch warehouse from selected item group
-				let item_group = filters.item_group.get_value() || null;
-				let default_warehouse = '';
-				if (item_group) {
+			// Auto-fetch warehouse from selected item group
+			let item_group = filters.item_group.get_value() || null;
+			let default_warehouse = '';
+			if (item_group) {
+				frappe.call({
+					method: 'moi.moi.page.stock_operations.stock_operations.get_mapping_by_item_group',
+					args: { item_group },
+					async: false,
+					callback: (res) => {
+						if (res.message && res.message.warehouse)
+							default_warehouse = res.message.warehouse;
+					}
+				});
+			}
+
+			let fields = [
+				{
+					label: 'Warehouse',
+					fieldname: 'warehouse',
+					fieldtype: 'Link',
+					options: 'Warehouse',
+					reqd: 1,
+					default: default_warehouse
+				}
+			];
+
+			if (type === 'Transfer') fields.push({
+				label: 'Target Warehouse',
+				fieldname: 'target_warehouse',
+				fieldtype: 'Link',
+				options: 'Warehouse',
+				reqd: 1
+			});
+			if (type === 'Issue') fields.push({
+				label: 'Department',
+				fieldname: 'department',
+				fieldtype: 'Link',
+				options: 'Department',
+				reqd: 1
+			});
+
+			fields.push({
+				label: 'Posting Date',
+				fieldname: 'posting_date',
+				fieldtype: 'Date',
+				default: frappe.datetime.get_today(),
+				reqd: 1
+			});
+
+			fields.push({ fieldtype: 'Section Break', label: 'Items' });
+			fields.push({
+				label: 'Set Quantity for All Items',
+				fieldname: 'set_all_qty',
+				fieldtype: 'Float',
+				description: 'Enter a number to apply to all rows automatically'
+			});
+
+			fields.push({
+				fieldname: 'items',
+				fieldtype: 'Table',
+				label: 'Items',
+				cannot_add_rows: true,
+				cannot_delete_rows: true,
+				fields: [
+					{
+						fieldname: 'item_code',
+						fieldtype: 'Link',
+						label: 'Item Code',
+						options: 'Item',
+						in_list_view: 1,
+						read_only: 1
+					},
+					{
+						fieldname: 'item_name',
+						fieldtype: 'Data',
+						label: 'Item Name',
+						in_list_view: 1,
+						read_only: 1
+					},
+					{
+						fieldname: 'qty',
+						fieldtype: 'Float',
+						label: 'Quantity',
+						in_list_view: 1,
+						reqd: 1
+					},
+					{
+						fieldname: 'uom',
+						fieldtype: 'Link',
+						label: 'UOM',
+						options: 'UOM',
+						in_list_view: 1,
+						reqd: 1
+					},
+					{
+						fieldname: 'price',
+						fieldtype: 'Currency',
+						label: 'Price',
+						in_list_view: 1,
+						reqd: 1
+					}
+				],
+				data: items_data.map(i => ({
+					item_code: i.item_code,
+					item_name: i.item_name,
+					qty: 1,
+					uom: i.default_uom,
+					price: i.valuation_rate || 0
+				}))
+			});
+
+			let d = new frappe.ui.Dialog({
+				title: `Bulk ${type} - ${item_codes.length} Items`,
+				fields,
+				size: 'large',
+				primary_action_label: 'Create',
+				primary_action(values) {
+					let items = values.items || [];
+					if (!items.length) return;
+					for (let row of items) {
+						if (!row.qty || !row.price || !row.uom) {
+							frappe.msgprint(__('All rows must have Quantity, UOM, and Price'));
+							return;
+						}
+					}
+
+					frappe.show_alert({
+						message: __('Creating Stock Entry...'),
+						indicator: 'blue'
+					});
+
 					frappe.call({
-						method: 'moi.moi.page.stock_operations.stock_operations.get_mapping_by_item_group',
-						args: { item_group },
-						async: false,
-						callback: (res) => {
-							if (res.message && res.message.warehouse)
-								default_warehouse = res.message.warehouse;
+						method: 'moi.moi.page.stock_operations.stock_operations.make_bulk_stock_entry',
+						args: {
+							items,
+							warehouse: values.warehouse,
+							type,
+							posting_date: values.posting_date,
+							target_warehouse: values.target_warehouse || null,
+							department: values.department || null
+						},
+						callback: function (res) {
+							if (!res.exc) {
+								let message = res.message;
+								if (message.submitted) {
+									frappe.show_alert({
+										message: __(
+											'Stock Entry {0} submitted successfully',
+											[message.stock_entry]
+										),
+										indicator: 'green'
+									});
+								} else {
+									frappe.show_alert({
+										message: __(
+											'Stock Entry {0} created in draft',
+											[message.stock_entry]
+										),
+										indicator: 'blue'
+									});
+								}
+								d.hide();
+								selected_items.clear();
+								load_items();
+							}
 						}
 					});
 				}
+			});
 
-				let fields = [
-					{
-						label: 'Warehouse',
-						fieldname: 'warehouse',
-						fieldtype: 'Link',
-						options: 'Warehouse',
-						reqd: 1,
-						default: default_warehouse
-					}
-				];
+			// ✅ Global quantity setter
+			d.fields_dict.set_all_qty.df.onchange = function () {
+				let qty = d.get_value('set_all_qty');
+				let table = d.fields_dict.items.grid;
+				table.data.forEach(row => (row.qty = qty));
+				table.refresh();
+			};
 
-				if (type === 'Transfer') fields.push({
-					label: 'Target Warehouse', fieldname: 'target_warehouse',
-					fieldtype: 'Link', options: 'Warehouse', reqd: 1
-				});
-				if (type === 'Issue') fields.push({
-					label: 'Department', fieldname: 'department',
-					fieldtype: 'Link', options: 'Department', reqd: 1
-				});
+			d.show();
 
-				fields.push({
-					label: 'Posting Date',
-					fieldname: 'posting_date',
-					fieldtype: 'Date',
-					default: frappe.datetime.get_today(),
-					reqd: 1
-				});
+			// ✅ Bind UOM dropdown + price refresh
+			frappe.after_ajax(() => {
+				let grid = d.fields_dict.items.grid;
+				if (!grid || !grid.grid_rows) return;
 
-				fields.push({ fieldtype: 'Section Break', label: 'Items' });
+				grid.grid_rows.forEach(row => {
+					// Dynamically load allowed UOMs for the item
+					frappe.call({
+						method: 'moi.moi.page.stock_operations.stock_operations.get_item_uoms',
+						args: { item_code: row.doc.item_code },
+						callback: function (res) {
+							if (res.message && Array.isArray(res.message)) {
+								let uom_field = row.get_field('uom');
+								let uoms = res.message.map(u => u.uom);
+let field = row.get_field('uom');
 
-				// 🟡 Global Quantity Field
-				fields.push({
-					label: 'Set Quantity for All Items',
-					fieldname: 'set_all_qty',
-					fieldtype: 'Float',
-					description: 'Enter a number to apply to all rows automatically'
-				});
+// Keep Link field options as "UOM", but set suggestion data
+field.df.options = 'UOM';
+field.get_query = () => ({
+	filters: { name: ['in', uoms] }
+});
 
-				fields.push({
-					fieldname: 'items',
-					fieldtype: 'Table',
-					label: 'Items',
-					cannot_add_rows: true,
-					cannot_delete_rows: true,
-					fields: [
-						{ fieldname: 'item_code', fieldtype: 'Link', label: 'Item Code', options: 'Item', in_list_view: 1, read_only: 1 },
-						{ fieldname: 'item_name', fieldtype: 'Data', label: 'Item Name', in_list_view: 1, read_only: 1 },
-						{ fieldname: 'qty', fieldtype: 'Float', label: 'Quantity', in_list_view: 1, reqd: 1 },
-						{ fieldname: 'price', fieldtype: 'Currency', label: 'Price', in_list_view: 1, reqd: 1 }
-					],
-					data: items_data.map(i => ({
-						item_code: i.item_code,
-						item_name: i.item_name,
-						qty: 1,
-						price: i.valuation_rate || 0
-					}))
-				});
+// Optionally preselect default UOM if it exists
+if (uoms.length && !row.doc.uom) {
+	row.doc.uom = uoms[0];
+	row.refresh_field('uom');
+}
 
-				let d = new frappe.ui.Dialog({
-					title: `Bulk ${type} - ${item_codes.length} Items`,
-					fields,
-					size: 'large',
-					primary_action_label: 'Create',
-					primary_action(values) {
-						let items = values.items || [];
-						if (!items.length) return;
-						for (let row of items) {
-							if (!row.qty || !row.price) {
-								frappe.msgprint(__('All rows must have quantity and price'));
-								return;
 							}
 						}
-						
-						// Show processing message
-						frappe.show_alert({
-							message: __('Creating Stock Entry...'),
-							indicator: 'blue'
-						});
-						
-						frappe.call({
-							method: 'moi.moi.page.stock_operations.stock_operations.make_bulk_stock_entry',
-							args: {
-								items, warehouse: values.warehouse,
-								type, posting_date: values.posting_date,
-								target_warehouse: values.target_warehouse || null,
-								department: values.department || null
-							},
-							callback: function(res) {
-								if (!res.exc) {
-									let message = res.message;
-									
-									if (message.submitted) {
-										frappe.show_alert({
-											message: __('Stock Entry {0} submitted successfully', [message.stock_entry]),
-											indicator: 'green'
-										});
-									} else {
-										frappe.show_alert({
-											message: __('Stock Entry {0} created in draft', [message.stock_entry]),
-											indicator: 'blue'
-										});
+					});
+
+					// Safety: apply get_query as fallback
+					row.get_field('uom').get_query = function () {
+						return {
+							query: 'moi.moi.page.stock_operations.stock_operations.get_item_uoms',
+							filters: { item_code: row.doc.item_code }
+						};
+					};
+
+					// Auto price update when UOM changes
+					$(row.get_field('uom').input).on('change', function () {
+						let uom = row.doc.uom;
+						if (uom) {
+							frappe.call({
+								method: 'moi.moi.page.stock_operations.stock_operations.get_price_for_uom',
+								args: {
+									item_code: row.doc.item_code,
+									uom
+								},
+								callback: function (res) {
+									if (res.message) {
+										row.doc.price = res.message.price;
+										row.refresh_field('price');
 									}
-									
-									d.hide(); 
-									selected_items.clear(); 
-									load_items();
 								}
-							}
-						});
-					}
+							});
+						}
+					});
 				});
 
-				// --- 🟡 Bind global qty update ---
-				d.fields_dict.set_all_qty.df.onchange = function() {
-					let qty = d.get_value('set_all_qty');
-					let table = d.fields_dict.items.grid;
-					table.data.forEach(row => row.qty = qty);
-					table.refresh();
-				};
-
-				d.show();
-			}
-		});
-	}
+			});
+		}
+	});
+}
 
 	function open_popup(type, item_code) {
 		frappe.call({
@@ -396,6 +499,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				let warehouse = item_details.warehouse || '';
 				let valuation_rate = item_details.valuation_rate || 0;
 				let barcode = item_details.barcode || '';
+				let default_uom = item_details.default_uom || '';
 
 				// Build dialog fields based on operation type
 				let fields = [
@@ -465,6 +569,38 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					fieldtype: 'Float',
 					reqd: 1
 				});
+
+				// Add UOM field with query to filter based on item
+				fields.push({
+					label: 'UOM',
+					fieldname: 'uom',
+					fieldtype: 'Link',
+					options: 'UOM',
+					default: default_uom,
+					reqd: 1,
+					get_query: function() {
+						return {
+							query: 'moi.moi.page.stock_operations.stock_operations.get_single_item_uoms',
+							filters: { item_code: item_code }
+						};
+					},
+					onchange: function() {
+						let selected_uom = d.get_value('uom');
+						if (selected_uom) {
+							// Fetch price for selected UOM
+							frappe.call({
+								method: 'moi.moi.page.stock_operations.stock_operations.get_price_for_uom',
+								args: { item_code: item_code, uom: selected_uom },
+								callback: function(res) {
+									if (res.message) {
+										d.set_value('price', res.message.price);
+									}
+								}
+							});
+						}
+					}
+				});
+
 				fields.push({
 					label: 'Price',
 					fieldname: 'price',
@@ -478,7 +614,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					fields: fields,
 					primary_action_label: 'Create',
 					primary_action(values) {
-						// Show processing message
 						frappe.show_alert({
 							message: __('Creating Stock Entry...'),
 							indicator: 'blue'
@@ -488,6 +623,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 						let data = {
 							item_code: values.item_code,
 							qty: values.qty,
+							uom: values.uom,
 							price: values.price,
 							warehouse: values.warehouse,
 							posting_date: values.posting_date,
