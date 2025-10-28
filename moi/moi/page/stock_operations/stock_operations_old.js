@@ -62,7 +62,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				//for print barcode dialog box
 				print: "Print",
 				print_barcode_label : "Number Of Copies",
-				print_barcode_table_title : "Print Barcode",
 				//other msgprint and alert translation
 				all_condition_validation: "All rows must have Quantity, UOM, and Price translate in arabic",
 				valid_number_of_copies: "Please enter a valid number of copies",
@@ -92,7 +91,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			//for print barcode dialog box
 			print: "طباعة",
 			print_barcode_label : "عدد النسخ",
-			print_barcode_table_title : "طباعة الباركود",
 			//other msgprint and alert translation
 			all_condition_validation: "يجب أن تحتوي جميع الصفوف على الكمية ووحدة القياس والسعر",
 			valid_number_of_copies: "يرجى إدخال عدد نسخ صالح",
@@ -219,15 +217,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 		bind_button_events();
 		update_row_buttons_state();
 	}
-
-    // helper function
-    function t(key, args = []) {
-    let text = table_lang[key] || key;
-    args.forEach((val, i) => {
-        text = text.replace(`{${i}}`, val);
-    });
-    return text;
-    }
 
 	function bind_checkbox_events() {
 		// Select All checkbox
@@ -441,13 +430,13 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					if (!items.length) return;
 					for (let row of items) {
 						if (!row.qty || !row.price || !row.uom) {
-							frappe.msgprint(`${table_lang.all_condition_validation}`);
+							frappe.msgprint(__(`all_condition_validation`));
 							return;
 						}
 					}
 
 					frappe.show_alert({
-						message: `${table_lang.creating_stock_entry}`,
+						message: __(`creating_stock_entry`),
 						indicator: 'blue'
 					});
 
@@ -466,12 +455,15 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 								let message = res.message;
 								if (message.submitted) {
 									frappe.show_alert({
-										message: t("stock_entry_submit_success", [stock_entry_name]),
+										message: __(
+											`stock_entry_submit_success`,
+											[message.stock_entry]
+										),
 										indicator: 'green'
 									});
 								} else {
 									frappe.show_alert({
-										message: t(
+										message: __(
 											'stock_entry_draft_created',
 											[message.stock_entry]
 										),
@@ -712,7 +704,7 @@ if (uoms.length && !row.doc.uom) {
 					primary_action_label: table_lang.create,
 					primary_action(values) {
 						frappe.show_alert({
-							message: `${table_lang.creating_stock_entry}`,
+							message: __('creating_stock_entry'),
 							indicator: 'blue'
 						});
 						
@@ -756,12 +748,12 @@ if (uoms.length && !row.doc.uom) {
 												
 												if (docstatus === 1) {
 													frappe.show_alert({
-														message: t("stock_entry_submit_success", [stock_entry_name]),
+														message: __("stock_entry_submit_success", [stock_entry_name]),
 														indicator: 'green'
 													});
 												} else {
 													frappe.show_alert({
-														message: t("stock_entry_draft_created", [stock_entry_name]),
+														message: __("stock_entry_draft_created", [stock_entry_name]),
 														indicator: 'blue'
 													});
 												}
@@ -799,7 +791,7 @@ if (uoms.length && !row.doc.uom) {
 			primary_action_label: table_lang.print,
 			primary_action(values) {
 				if (values.copies < 1) {
-					frappe.msgprint(`${table_lang.valid_number_of_copies}`);
+					frappe.msgprint(__(`valid_number_of_copies`));
 					return;
 				}
 				print_barcode(item_code, values.copies);
@@ -815,7 +807,7 @@ if (uoms.length && !row.doc.uom) {
 			args: { item_code: item_code },
 			callback: function (r) {
 				if (!r.message) {
-					frappe.msgprint(`${table_lang.no_barcode_found}`);
+					frappe.msgprint(__('no_barcode_found'));
 					return;
 				}
 
@@ -844,7 +836,7 @@ if (uoms.length && !row.doc.uom) {
 					<!DOCTYPE html>
 					<html>
 					<head>
-						<title>${table_lang.print_barcode_table_title} - ${item_data.item_code}</title>
+						<title>Print Barcode - ${item_data.item_code}</title>
 						<style>
 							@media print {
 								.page-break {
