@@ -346,20 +346,60 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				}
 			];
 
-			if (type === 'Transfer') fields.push({
-				label: 'Target Warehouse',
-				fieldname: 'target_warehouse',
-				fieldtype: 'Link',
-				options: 'Warehouse',
-				reqd: 1
-			});
-			if (type === 'Issue') fields.push({
-				label: 'Department',
-				fieldname: 'department',
-				fieldtype: 'Link',
-				options: 'Department',
-				reqd: 1
-			});
+			if (type === 'Transfer') {
+				fields.push({
+					label: 'Target Warehouse',
+					fieldname: 'target_warehouse',
+					fieldtype: 'Link',
+					options: 'Warehouse',
+					reqd: 1
+				});
+			}
+
+			if (type === 'Issue') {
+				// --- Department Hierarchy ---
+				fields.push({
+					label: 'Head Department',
+					fieldname: 'main_department',
+					fieldtype: 'Link',
+					options: 'Department',
+					reqd: 1,
+					get_query: () => {
+						return {
+							filters: { is_group: 1 }
+						};
+					}
+				});
+				fields.push({
+					label: 'Department',
+					fieldname: 'department',
+					fieldtype: 'Link',
+					options: 'Department',
+					reqd: 1,
+					get_query: () => {
+						let main_dep = cur_dialog.get_value('main_department');
+						return {
+							filters: {
+								parent_department: main_dep,
+								is_group: 0
+							}
+						};
+					}
+				});
+				fields.push({
+					label: 'Division',
+					fieldname: 'division',
+					fieldtype: 'Link',
+					options: 'Division',
+					reqd: 1,
+					get_query: () => {
+						let dep = cur_dialog.get_value('department');
+						return {
+							filters: { department: dep }
+						};
+					}
+				});
+			}
 
 			fields.push({
 				label: 'Posting Date',
@@ -439,6 +479,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				primary_action(values) {
 					let items = values.items || [];
 					if (!items.length) return;
+
 					for (let row of items) {
 						if (!row.qty || !row.price || !row.uom) {
 							frappe.msgprint(`${table_lang.all_condition_validation}`);
@@ -459,22 +500,21 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 							type,
 							posting_date: values.posting_date,
 							target_warehouse: values.target_warehouse || null,
-							department: values.department || null
+							main_department: values.main_department || null,
+							department: values.department || null,
+							division: values.division || null
 						},
 						callback: function (res) {
 							if (!res.exc) {
 								let message = res.message;
 								if (message.submitted) {
 									frappe.show_alert({
-										message: t("stock_entry_submit_success", [stock_entry_name]),
+										message: t("stock_entry_submit_success", [message.stock_entry]),
 										indicator: 'green'
 									});
 								} else {
 									frappe.show_alert({
-										message: t(
-											'stock_entry_draft_created',
-											[message.stock_entry]
-										),
+										message: t('stock_entry_draft_created', [message.stock_entry]),
 										indicator: 'blue'
 									});
 								}
@@ -486,6 +526,15 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					});
 				}
 			});
+
+			// ✅ Auto-clear child fields when parent changes
+			d.fields_dict.main_department.df.onchange = () => {
+				d.set_value('department', null);
+				d.set_value('division', null);
+			};
+			d.fields_dict.department.df.onchange = () => {
+				d.set_value('division', null);
+			};
 
 			// ✅ Global quantity setter
 			d.fields_dict.set_all_qty.df.onchange = function () {
@@ -503,50 +552,31 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				if (!grid || !grid.grid_rows) return;
 
 				grid.grid_rows.forEach(row => {
-					// Dynamically load allowed UOMs for the item
 					frappe.call({
 						method: 'moi.moi.page.stock_operations.stock_operations.get_item_uoms',
 						args: { item_code: row.doc.item_code },
 						callback: function (res) {
 							if (res.message && Array.isArray(res.message)) {
-								let uom_field = row.get_field('uom');
 								let uoms = res.message.map(u => u.uom);
-let field = row.get_field('uom');
-
-// Keep Link field options as "UOM", but set suggestion data
-field.df.options = 'UOM';
-field.get_query = () => ({
-	filters: { name: ['in', uoms] }
-});
-
-// Optionally preselect default UOM if it exists
-if (uoms.length && !row.doc.uom) {
-	row.doc.uom = uoms[0];
-	row.refresh_field('uom');
-}
-
+								let field = row.get_field('uom');
+								field.df.options = 'UOM';
+								field.get_query = () => ({
+									filters: { name: ['in', uoms] }
+								});
+								if (uoms.length && !row.doc.uom) {
+									row.doc.uom = uoms[0];
+									row.refresh_field('uom');
+								}
 							}
 						}
 					});
 
-					// Safety: apply get_query as fallback
-					row.get_field('uom').get_query = function () {
-						return {
-							query: 'moi.moi.page.stock_operations.stock_operations.get_item_uoms',
-							filters: { item_code: row.doc.item_code }
-						};
-					};
-
-					// Auto price update when UOM changes
 					$(row.get_field('uom').input).on('change', function () {
 						let uom = row.doc.uom;
 						if (uom) {
 							frappe.call({
 								method: 'moi.moi.page.stock_operations.stock_operations.get_price_for_uom',
-								args: {
-									item_code: row.doc.item_code,
-									uom
-								},
+								args: { item_code: row.doc.item_code, uom },
 								callback: function (res) {
 									if (res.message) {
 										row.doc.price = res.message.price;
@@ -557,11 +587,11 @@ if (uoms.length && !row.doc.uom) {
 						}
 					});
 				});
-
 			});
 		}
 	});
 }
+
 
 	function get_translated_type(type) {
     const user_lang = frappe.boot.user.language || frappe.boot.lang || "en";
@@ -584,202 +614,238 @@ if (uoms.length && !row.doc.uom) {
     return type;
 }
 	function open_popup(type, item_code) {
-		frappe.call({
-			method: 'moi.moi.page.stock_operations.stock_operations.get_item_details',
-			args: { item_code },
-			callback: function (r) {
-				if (!r.message) return;
+	frappe.call({
+		method: 'moi.moi.page.stock_operations.stock_operations.get_item_details',
+		args: { item_code },
+		callback: function (r) {
+			if (!r.message) return;
 
-				let item_details = r.message;
-				let warehouse = item_details.warehouse || '';
-				let valuation_rate = item_details.valuation_rate || 0;
-				let barcode = item_details.barcode || '';
-				let default_uom = item_details.default_uom || '';
+			let item_details = r.message;
+			let warehouse = item_details.warehouse || '';
+			let valuation_rate = item_details.valuation_rate || 0;
+			let barcode = item_details.barcode || '';
+			let default_uom = item_details.default_uom || '';
 
-				// Build dialog fields based on operation type
-				let fields = [
-					{ 
-						label: 'Item Code', 
-						fieldname: 'item_code', 
-						fieldtype: 'Data', 
-						read_only: 1, 
-						default: item_code 
-					}
-				];
-
-				// Add barcode field if exists
-				if (barcode) {
-					fields.push({ 
-						label: 'Barcode', 
-						fieldname: 'barcode', 
-						fieldtype: 'Data', 
-						read_only: 1, 
-						default: barcode 
-					});
+			let fields = [
+				{
+					label: 'Item Code',
+					fieldname: 'item_code',
+					fieldtype: 'Data',
+					read_only: 1,
+					default: item_code
 				}
+			];
 
-				// Add warehouse field
-				fields.push({ 
-					label: 'Warehouse', 
-					fieldname: 'warehouse', 
-					fieldtype: 'Link', 
-					options: 'Warehouse', 
-					default: warehouse,
-					reqd: 1
-				});
-
-				// Add type-specific fields
-				if (type === 'Transfer') {
-					fields.push({
-						label: 'Target Warehouse',
-						fieldname: 'target_warehouse',
-						fieldtype: 'Link',
-						options: 'Warehouse',
-						reqd: 1
-					});
-				}
-
-				if (type === 'Issue') {
-					fields.push({
-						label: 'Department',
-						fieldname: 'department',
-						fieldtype: 'Link',
-						options: 'Department',
-						reqd: 1
-					});
-				}
-
-				// Common fields
+			if (barcode) {
 				fields.push({
-					label: 'Date',
-					fieldname: 'posting_date',
-					fieldtype: 'Date',
-					default: frappe.datetime.get_today(),
-					reqd: 1
+					label: 'Barcode',
+					fieldname: 'barcode',
+					fieldtype: 'Data',
+					read_only: 1,
+					default: barcode
 				});
+			}
 
-				fields.push({
-					label: 'Quantity',
-					fieldname: 'qty',
-					fieldtype: 'Float',
-					reqd: 1
-				});
+			fields.push({
+				label: 'Warehouse',
+				fieldname: 'warehouse',
+				fieldtype: 'Link',
+				options: 'Warehouse',
+				default: warehouse,
+				reqd: 1
+			});
 
-				// Add UOM field with query to filter based on item
+			// Add Transfer-specific field
+			if (type === 'Transfer') {
 				fields.push({
-					label: 'UOM',
-					fieldname: 'uom',
+					label: 'Target Warehouse',
+					fieldname: 'target_warehouse',
 					fieldtype: 'Link',
-					options: 'UOM',
-					default: default_uom,
+					options: 'Warehouse',
+					reqd: 1
+				});
+			}
+
+			// Add Department fields for Issue or Transfer
+			if (type === 'Transfer' || type === 'Issue') {
+				fields.push({
+					label: 'Head Department',
+					fieldname: 'main_department',
+					fieldtype: 'Link',
+					options: 'Department',
 					reqd: 1,
-					get_query: function() {
+					get_query: () => {
 						return {
-							query: 'moi.moi.page.stock_operations.stock_operations.get_single_item_uoms',
-							filters: { item_code: item_code }
+							filters: {
+								is_group: 1
+							}
 						};
-					},
-					onchange: function() {
-						let selected_uom = d.get_value('uom');
-						if (selected_uom) {
-							// Fetch price for selected UOM
-							frappe.call({
-								method: 'moi.moi.page.stock_operations.stock_operations.get_price_for_uom',
-								args: { item_code: item_code, uom: selected_uom },
-								callback: function(res) {
-									if (res.message) {
-										d.set_value('price', res.message.price);
-									}
-								}
-							});
-						}
 					}
 				});
 
 				fields.push({
-					label: 'Price',
-					fieldname: 'price',
-					fieldtype: 'Currency',
-					default: valuation_rate
-				});
-				//getting the type translation
-				const translated_type = get_translated_type(type);
-				// Create dialog
-				let d = new frappe.ui.Dialog({
-
-					title: `${translated_type} ${table_lang.item} - ${item_code}`,
-					fields: fields,
-					primary_action_label: table_lang.create,
-					primary_action(values) {
-						frappe.show_alert({
-							message: `${table_lang.creating_stock_entry}`,
-							indicator: 'blue'
-						});
-						
-						// Prepare data for submission
-						let data = {
-							item_code: values.item_code,
-							qty: values.qty,
-							uom: values.uom,
-							price: values.price,
-							warehouse: values.warehouse,
-							posting_date: values.posting_date,
-							type: type
+					label: 'Department',
+					fieldname: 'department',
+					fieldtype: 'Link',
+					options: 'Department',
+					reqd: 1,
+					get_query: () => {
+						let main_dep = cur_dialog.get_value('main_department');
+						return {
+							filters: {
+								parent_department: main_dep,
+								is_group: 0
+							}
 						};
+					}
+				});
 
-						// Add type-specific fields
-						if (type === 'Transfer') {
-							data.target_warehouse = values.target_warehouse;
-						}
-						if (type === 'Issue') {
-							data.department = values.department;
-						}
+				fields.push({
+					label: 'Division',
+					fieldname: 'division',
+					fieldtype: 'Link',
+					options: 'Division',
+					reqd: 1,
+					get_query: () => {
+						let dep = cur_dialog.get_value('department');
+						return {
+							filters: {
+								department: dep
+							}
+						};
+					}
+				});
 
+			}
+
+			fields.push({
+				label: 'Date',
+				fieldname: 'posting_date',
+				fieldtype: 'Date',
+				default: frappe.datetime.get_today(),
+				reqd: 1
+			});
+
+			fields.push({
+				label: 'Quantity',
+				fieldname: 'qty',
+				fieldtype: 'Float',
+				reqd: 1
+			});
+
+			fields.push({
+				label: 'UOM',
+				fieldname: 'uom',
+				fieldtype: 'Link',
+				options: 'UOM',
+				default: default_uom,
+				reqd: 1,
+				get_query: function () {
+					return {
+						query: 'moi.moi.page.stock_operations.stock_operations.get_single_item_uoms',
+						filters: { item_code: item_code }
+					};
+				},
+				onchange: function () {
+					let selected_uom = d.get_value('uom');
+					if (selected_uom) {
 						frappe.call({
-							method: 'moi.moi.page.stock_operations.stock_operations.make_stock_entry',
-							args: data,
+							method: 'moi.moi.page.stock_operations.stock_operations.get_price_for_uom',
+							args: { item_code: item_code, uom: selected_uom },
 							callback: function (res) {
-								if (!res.exc) {
-									let stock_entry_name = res.message;
-									
-									// Check if stock entry was submitted or saved as draft
-									frappe.call({
-										method: 'frappe.client.get_value',
-										args: {
-											doctype: 'Stock Entry',
-											filters: { name: stock_entry_name },
-											fieldname: 'docstatus'
-										},
-										callback: function(doc_res) {
-											if (!doc_res.exc) {
-												let docstatus = doc_res.message.docstatus;
-												
-												if (docstatus === 1) {
-													frappe.show_alert({
-														message: t("stock_entry_submit_success", [stock_entry_name]),
-														indicator: 'green'
-													});
-												} else {
-													frappe.show_alert({
-														message: t("stock_entry_draft_created", [stock_entry_name]),
-														indicator: 'blue'
-													});
-												}
-												
-												d.hide();
-												load_items();
-											}
-										}
-									});
+								if (res.message) {
+									d.set_value('price', res.message.price);
 								}
 							}
 						});
 					}
-				});
-				d.show();
-			}
-		});
-	}
+				}
+			});
+
+			fields.push({
+				label: 'Price',
+				fieldname: 'price',
+				fieldtype: 'Currency',
+				default: valuation_rate
+			});
+
+			const translated_type = get_translated_type(type);
+
+			let d = new frappe.ui.Dialog({
+				title: `${translated_type} ${table_lang.item} - ${item_code}`,
+				fields: fields,
+				primary_action_label: table_lang.create,
+				primary_action(values) {
+					frappe.show_alert({
+						message: `${table_lang.creating_stock_entry}`,
+						indicator: 'blue'
+					});
+
+					let data = {
+						item_code: values.item_code,
+						qty: values.qty,
+						uom: values.uom,
+						price: values.price,
+						warehouse: values.warehouse,
+						posting_date: values.posting_date,
+						type: type
+					};
+
+					if (type === 'Transfer') {
+						data.target_warehouse = values.target_warehouse;
+					}
+
+					if (type === 'Transfer' || type === 'Issue') {
+						data.custom_main_department = values.main_department;
+						data.department = values.department;
+						data.custom_division = values.division;
+					}
+
+					frappe.call({
+						method: 'moi.moi.page.stock_operations.stock_operations.make_stock_entry',
+						args: data,
+						callback: function (res) {
+							if (!res.exc) {
+								let stock_entry_name = res.message;
+
+								frappe.call({
+									method: 'frappe.client.get_value',
+									args: {
+										doctype: 'Stock Entry',
+										filters: { name: stock_entry_name },
+										fieldname: 'docstatus'
+									},
+									callback: function (doc_res) {
+										if (!doc_res.exc) {
+											let docstatus = doc_res.message.docstatus;
+
+											if (docstatus === 1) {
+												frappe.show_alert({
+													message: t('stock_entry_submit_success', [stock_entry_name]),
+													indicator: 'green'
+												});
+											} else {
+												frappe.show_alert({
+													message: t('stock_entry_draft_created', [stock_entry_name]),
+													indicator: 'blue'
+												});
+											}
+
+											d.hide();
+											load_items();
+										}
+									}
+								});
+							}
+						}
+					});
+				}
+			});
+
+			d.show();
+		}
+	});
+}
 
 	function open_print_dialog(item_code) {
 		const label_trans = user_lang.startsWith("ar") ? "عدد النسخ" : "Number Of Copies";

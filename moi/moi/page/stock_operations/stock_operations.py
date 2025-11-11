@@ -304,7 +304,8 @@ def get_submit_setting():
 @frappe.whitelist()
 def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None, 
                      target_warehouse=None, department=None, batch_no=None, 
-                     batch_id=None, manufacturing_date=None, expiry_date=None, uom=None):
+                     batch_id=None, manufacturing_date=None, expiry_date=None, uom=None,
+                     custom_main_department=None, custom_division=None):
     """Create Stock Entry based on operation type"""
     
     # Map operation type to stock entry purpose
@@ -339,9 +340,17 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     stock_entry.stock_entry_type = purpose
     stock_entry.posting_date = posting_date or nowdate()
     
-    # Add department for Issue operations
+    # Add department for Issue and Transfer operations
     if department:
         stock_entry.custom_department = department
+    
+    # Add Main Department for Issue and Transfer operations
+    if custom_main_department:
+        stock_entry.custom_main_department = custom_main_department
+    
+    # Add Division for Issue and Transfer operations
+    if custom_division:
+        stock_entry.custom_division = custom_division
     
     # Prepare item details
     item_dict = {
@@ -471,7 +480,8 @@ def get_bulk_item_details(item_codes):
 
 @frappe.whitelist()
 def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
-                          target_warehouse=None, department=None):
+                          target_warehouse=None, department=None, 
+                          main_department=None, division=None):
     """Create bulk stock entries for multiple items with individual qty, price, and UOM"""
     
     # Convert items from JSON string to list
@@ -495,9 +505,17 @@ def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
     stock_entry.stock_entry_type = purpose
     stock_entry.posting_date = posting_date or nowdate()
     
-    # Add department for Issue operations
+    # Add department for Issue and Transfer operations
     if department:
         stock_entry.custom_department = department
+    
+    # Add Main Department for Issue and Transfer operations
+    if main_department:
+        stock_entry.custom_main_department = main_department
+    
+    # Add Division for Issue and Transfer operations
+    if division:
+        stock_entry.custom_division = division
     
     # Add each item to the stock entry with its individual qty, price, and UOM
     for item in items:
