@@ -102,7 +102,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			stock_entry_draft_created: "تم إنشاء إدخال المخزون {0} كمسودة",
 			creating_stock_entry: "جارٍ إنشاء إدخال المخزون...",
 			head_department: "رئيس القسم",
-			division: "قسم",
+			division: "شعبة",
 		}	
 		
 		};
