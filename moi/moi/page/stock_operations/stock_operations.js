@@ -419,7 +419,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					fieldtype: 'Table',
 					label: 'Items',
 					cannot_add_rows: true,
-					cannot_delete_rows: true,
+					
 					fields: [
 						{
 							fieldname: 'item_code',
@@ -496,6 +496,7 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 								warehouse: values.warehouse,
 								type,
 								posting_date: values.posting_date,
+								
 								target_warehouse: values.target_warehouse || null,
 								main_department: values.main_department || null,
 								department: values.department || null,
@@ -504,17 +505,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 							callback: function (res) {
 								if (!res.exc) {
 									let message = res.message;
-									if (message.submitted) {
+									if (type === "Add") {
 										frappe.show_alert({
 											message: t("stock_entry_submit_success", [message.stock_entry]),
 											indicator: 'green'
 										});
 									} else {
 										frappe.show_alert({
-											message: t('stock_entry_draft_created', [message.stock_entry]),
-											indicator: 'blue'
+											message: "Stock Entry Draft Created – Waiting For Approval",
+											indicator: 'orange'
 										});
 									}
+
 									d.hide();
 									selected_items.clear();
 									load_items();

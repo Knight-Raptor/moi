@@ -387,13 +387,20 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     stock_entry.insert()
     
     # Check if we should submit based on Table Mapping setting
-    should_submit = get_submit_setting()
-    if should_submit:
+    # should_submit = get_submit_setting()
+    # if should_submit:
+    #     stock_entry.submit()
+    #     frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
+    # else:
+    #     frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
+   
+    # Submit only for ADD operation – Issue and Transfer will always remain draft
+    if type == "Add" and get_submit_setting():
         stock_entry.submit()
-        frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
+        frappe.msgprint(_("Stock Entry {0} submitted").format(stock_entry.name))
     else:
-        frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
-    
+        frappe.msgprint(_("Stock Entry {0} is created as Draft for approval workflow").format(stock_entry.name))
+
     return stock_entry.name
 
 
@@ -565,13 +572,19 @@ def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
     stock_entry.insert()
     
     # Check if we should submit based on Table Mapping setting
-    should_submit = get_submit_setting()
-    if should_submit:
+    # should_submit = get_submit_setting()
+    # if should_submit:
+    #     stock_entry.submit()
+    #     frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
+    # else:
+    #     frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
+    # Submit only Add type – Leave Issue/Transfer draft
+    if type == "Add" and get_submit_setting():
         stock_entry.submit()
-        frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
+        frappe.msgprint(_("Stock Entry {0} submitted").format(stock_entry.name))
     else:
-        frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
-    
+        frappe.msgprint(_("Stock Entry {0} is Draft – waiting workflow approval").format(stock_entry.name))
+
     return {
         "status": "success",
         "stock_entry": stock_entry.name,
