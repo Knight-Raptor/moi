@@ -3,14 +3,154 @@ from frappe import _
 from frappe.utils import nowdate, cint, flt
 
 @frappe.whitelist()
-def get_items(item_group=None, item_code=None, barcode=None):
+def get_all_workspaces_with_mappings():
+   
+    try:
+        workspaces = frappe.db.sql("""
+            SELECT DISTINCT custom_workspace
+            FROM `tabTable Mapping Setting`
+            WHERE custom_workspace IS NOT NULL 
+            AND custom_workspace != ''
+        """, as_list=True)
+        
+        # Flatten the list of tuples to simple list
+        workspace_list = [w[0] for w in workspaces if w[0]]
+        
+        frappe.logger().info(f"Found {len(workspace_list)} workspaces with mappings")
+        
+        return workspace_list
+        
+    except Exception as e:
+        frappe.logger().error(f"Error in get_all_workspaces_with_mappings: {str(e)}")
+        return []
+
+
+@frappe.whitelist()
+def get_workspace_filters(workspace):
+    if not workspace:
+        return {
+            'success': False,
+            'message': _('No workspace provided')
+        }
+    
+    try:
+        # Query all mappings for this workspace
+        mappings = frappe.db.sql("""
+            SELECT 
+                tms.item_group,
+                tms.warehouse,
+                tms.custom_workspace
+            FROM 
+                `tabTable Mapping Setting` tms
+            WHERE 
+                tms.custom_workspace = %s
+        """, (workspace,), as_dict=True)
+        
+        # Log for debugging
+        frappe.logger().info(f"Searching for workspace: '{workspace}'")
+        frappe.logger().info(f"Found {len(mappings)} mappings")
+        
+        if mappings:
+            # Extract unique item groups and warehouses
+            item_groups = list(set([m.item_group for m in mappings if m.item_group]))
+            warehouses = list(set([m.warehouse for m in mappings if m.warehouse]))
+            
+            return {
+                'success': True,
+                'workspace': workspace,
+                'item_groups': item_groups,
+                'warehouses': warehouses,
+                'mappings': mappings,
+                'count': len(mappings)
+            }
+        else:
+            # Log all available workspaces for debugging
+            all_workspaces = frappe.db.sql("""
+                SELECT DISTINCT custom_workspace, item_group, warehouse
+                FROM `tabTable Mapping Setting`
+                WHERE custom_workspace IS NOT NULL
+            """, as_dict=True)
+            
+            frappe.logger().warning(f"No mapping found for workspace: '{workspace}'")
+            frappe.logger().warning(f"Available workspaces: {all_workspaces}")
+            
+            # Print to console for debugging
+            print("\n" + "="*80)
+            print(f"DEBUG: No match found for workspace: '{workspace}'")
+            print(f"All records in Table Mapping Setting:")
+            for record in all_workspaces:
+                print(f"  Item Group: {record.get('item_group')}, Warehouse: {record.get('warehouse')}, Workspace: '{record.get('custom_workspace')}'")
+            print("="*80 + "\n")
+            
+            return {
+                'success': False,
+                'message': _('No mapping found for workspace: {0}').format(workspace),
+                'workspace': workspace,
+                'available_workspaces': [w.custom_workspace for w in all_workspaces]
+            }
+            
+    except Exception as e:
+        frappe.logger().error(f"Error in get_workspace_filters: {str(e)}")
+        frappe.log_error(f"Workspace mapping error: {str(e)}", "Workspace Filter Error")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            'success': False,
+            'message': str(e)
+        }
+
+
+@frappe.whitelist()
+def get_workspace_from_context():
+    import re
+    from urllib.parse import unquote
+    
+    # Try to get from referrer
+    referrer = frappe.request.referrer or ""
+    workspace_pattern = r'/app/([^/\?#]+)'
+    match = re.search(workspace_pattern, referrer)
+    
+    if match:
+        workspace_slug = match.group(1)
+        # Decode URL encoding
+        workspace_name = unquote(workspace_slug).replace('-', ' ')
+        
+        # Check if this workspace exists in our mappings
+        exists = frappe.db.exists('Table Mapping Setting', {'custom_workspace': workspace_name})
+        if exists:
+            return workspace_name
+    
+    return None
+
+
+@frappe.whitelist()
+def get_items(item_group=None, item_code=None, barcode=None, workspace=None):
+    
+    if not workspace:
+        workspace = get_workspace_from_context()
+    
     conditions = ""
+    
+    # If workspace is provided, get its item groups and filter by them
+    if workspace:
+        workspace_data = get_workspace_filters(workspace)
+        if workspace_data.get('success') and workspace_data.get('item_groups'):
+            # Only apply workspace filter if user hasn't selected item_group manually
+            if not item_group:
+                item_groups = workspace_data['item_groups']
+                # Create IN clause for item groups
+                item_groups_str = ', '.join([frappe.db.escape(ig) for ig in item_groups])
+                conditions += f" AND i.item_group IN ({item_groups_str})"
+
+    
+    # Additional filters
     if item_group:
         conditions += f" AND i.item_group = {frappe.db.escape(item_group)}"
     if item_code:
         conditions += f" AND i.name = {frappe.db.escape(item_code)}"
     if barcode:
-        conditions += f" AND ib.barcode= {frappe.db.escape(barcode)}"
+        conditions += f" AND ib.barcode = {frappe.db.escape(barcode)}"
 
     items = frappe.db.sql(f"""
         SELECT 
@@ -56,8 +196,18 @@ def get_items(item_group=None, item_code=None, barcode=None):
 
 
 @frappe.whitelist()
+def get_item_group_by_workspace(workspace):
+    result = get_workspace_filters(workspace)
+    if result.get('success') and result.get('item_groups'):
+        return {
+            "item_group": result['item_groups'][0],
+            "warehouse": result['warehouses'][0] if result.get('warehouses') else None
+        }
+    return {}
+
+
+@frappe.whitelist()
 def get_item_details(item_code):
-    """Get item details including batch info, default warehouse, and default UOM"""
     item = frappe.get_doc("Item", item_code)
     
     # Get default warehouse from mapping using your existing logic
@@ -104,7 +254,6 @@ def get_item_details(item_code):
     }
 
 
-
 @frappe.whitelist()
 def get_single_item_uoms(doctype, txt, searchfield, start, page_len, filters):
     """Get UOMs defined for a specific item (must return list of lists for Link field)"""
@@ -129,15 +278,8 @@ def get_single_item_uoms(doctype, txt, searchfield, start, page_len, filters):
     return uoms
 
 
-
-
 @frappe.whitelist()
 def get_item_uoms(*args, **kwargs):
-    """
-    Handles both:
-      1. Direct frappe.call({ args: { item_code } })
-      2. Query calls from get_query() with (doctype, txt, searchfield, start, page_len, filters)
-    """
     # Case 1: Called manually via frappe.call
     item_code = kwargs.get("item_code")
 
@@ -163,7 +305,6 @@ def get_item_uoms(*args, **kwargs):
     uoms.extend(additional_uoms)
 
     return uoms
-
 
 
 @frappe.whitelist()
@@ -386,20 +527,15 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     # Insert
     stock_entry.insert()
     
-    # Check if we should submit based on Table Mapping setting
-    # should_submit = get_submit_setting()
-    # if should_submit:
-    #     stock_entry.submit()
-    #     frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
-    # else:
-    #     frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
-   
     # Submit only for ADD operation – Issue and Transfer will always remain draft
     if type == "Add" and get_submit_setting():
         stock_entry.submit()
         frappe.msgprint(_("Stock Entry {0} submitted").format(stock_entry.name))
     else:
-        frappe.msgprint(_("Stock Entry {0} is created as Draft for approval workflow").format(stock_entry.name))
+        if type == "Add":
+            frappe.msgprint(_("Stock Entry {0} created as Draft (auto submit disabled)").format(stock_entry.name))
+        else:
+            frappe.msgprint(_("Stock Entry {0} is created as Draft for approval workflow").format(stock_entry.name))
 
     return stock_entry.name
 
@@ -571,13 +707,6 @@ def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
     # Insert
     stock_entry.insert()
     
-    # Check if we should submit based on Table Mapping setting
-    # should_submit = get_submit_setting()
-    # if should_submit:
-    #     stock_entry.submit()
-    #     frappe.msgprint(_("Stock Entry {0} submitted successfully").format(stock_entry.name))
-    # else:
-    #     frappe.msgprint(_("Stock Entry {0} created in draft").format(stock_entry.name))
     # Submit only Add type – Leave Issue/Transfer draft
     if type == "Add" and get_submit_setting():
         stock_entry.submit()
@@ -589,7 +718,7 @@ def make_bulk_stock_entry(items, warehouse, type, posting_date=None,
         "status": "success",
         "stock_entry": stock_entry.name,
         "items_count": len(items),
-        "submitted": should_submit
+        "submitted": (type == "Add" and get_submit_setting())
     }
 
 

@@ -1,12 +1,171 @@
 //getting the user language for label translations
 let user_lang = frappe.boot.user.language || frappe.boot.lang || "en";
 let title = user_lang.startsWith("ar") ? "عمليات المخزون" : "Stock Operations";
+
+// ========================================
+// WORKSPACE LINK INTERCEPTOR - START
+// ========================================
+// This ensures workspace links properly pass the workspace parameter
+// FULLY DYNAMIC - Works with any workspace that has Table Mapping Settings
+
+// Cache for workspace validation
+let validWorkspacesCache = null;
+let cacheTimestamp = null;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Function to check if a workspace has mappings
+function isValidWorkspace(workspaceName, callback) {
+	// Check cache first
+	const now = Date.now();
+	if (validWorkspacesCache && cacheTimestamp && (now - cacheTimestamp < CACHE_DURATION)) {
+		callback(validWorkspacesCache.includes(workspaceName));
+		return;
+	}
+	
+	// Fetch from backend
+	frappe.call({
+		method: 'moi.moi.page.stock_operations.stock_operations.get_all_workspaces_with_mappings',
+		callback: function(r) {
+			if (r.message) {
+				validWorkspacesCache = r.message;
+				cacheTimestamp = Date.now();
+				callback(validWorkspacesCache.includes(workspaceName));
+			} else {
+				callback(false);
+			}
+		}
+	});
+}
+
+// Intercept clicks on stock-operations links
+$(document).on('click', 'a[href*="stock-operations"]', function(e) {
+	const $link = $(this);
+	const href = $link.attr('href');
+	
+	// Skip if already has workspace parameter
+	if (href.includes('?workspace=') || href.includes('&workspace=')) {
+		return true;
+	}
+	
+	// Check if we're on a workspace page
+	const currentRoute = frappe.get_route();
+	const currentWorkspace = currentRoute[0];
+	
+	// Skip if no workspace detected
+	if (!currentWorkspace) {
+		return true;
+	}
+	
+	// Prevent default and check if this workspace has mappings
+	e.preventDefault();
+	e.stopPropagation();
+	
+	isValidWorkspace(currentWorkspace, function(isValid) {
+		if (isValid) {
+			console.log('Valid workspace detected, adding parameter:', currentWorkspace);
+			
+			// Save to sessionStorage for fallback detection
+			sessionStorage.setItem('current_workspace', currentWorkspace);
+			sessionStorage.setItem('workspace_timestamp', Date.now().toString());
+			
+			// Navigate with workspace parameter
+			window.location.href = `/app/stock-operations?workspace=${encodeURIComponent(currentWorkspace)}`;
+		} else {
+			console.log('No mappings found for workspace:', currentWorkspace);
+			// Navigate without parameter
+			window.location.href = '/app/stock-operations';
+		}
+	});
+	
+	return false;
+});
+
+// Clear old sessionStorage data (older than 1 hour)
+const workspaceTimestamp = sessionStorage.getItem('workspace_timestamp');
+if (workspaceTimestamp) {
+	const age = Date.now() - parseInt(workspaceTimestamp);
+	if (age > 60 * 60 * 1000) { // 1 hour
+		sessionStorage.removeItem('current_workspace');
+		sessionStorage.removeItem('workspace_timestamp');
+	}
+}
+
+// ========================================
+// WORKSPACE LINK INTERCEPTOR - END
+// ========================================
+
 frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
 		title: title,
 		single_column: true
 	});
+
+	// ========================================
+	// WORKSPACE FILTER FUNCTIONALITY - START
+	// ========================================
+	
+	// Get workspace from multiple sources with priority order
+	const urlParams = new URLSearchParams(window.location.search);
+	let workspace = urlParams.get('workspace');
+	
+	console.log("Step 1 - Workspace from URL:", workspace);
+	
+	// If no workspace in URL, try sessionStorage
+	if (!workspace) {
+		const storedWorkspace = sessionStorage.getItem('current_workspace');
+		const storedTimestamp = sessionStorage.getItem('workspace_timestamp');
+		
+		// Only use if less than 5 minutes old
+		if (storedWorkspace && storedTimestamp) {
+			const age = Date.now() - parseInt(storedTimestamp);
+			if (age < 5 * 60 * 1000) { // 5 minutes
+				workspace = storedWorkspace;
+				console.log("Step 2 - Workspace from sessionStorage:", workspace);
+			} else {
+				// Clear old data
+				sessionStorage.removeItem('current_workspace');
+				sessionStorage.removeItem('workspace_timestamp');
+			}
+		}
+	}
+	
+	// If still no workspace, try to detect from document referrer
+	if (!workspace && document.referrer) {
+		try {
+			const referrerUrl = new URL(document.referrer);
+			const referrerPath = referrerUrl.pathname;
+			
+			// Extract workspace from path like /app/مستودع-الأثاث
+			const match = referrerPath.match(/\/app\/([^\/\?#]+)/);
+			if (match && match[1]) {
+				const possibleWorkspace = decodeURIComponent(match[1]).replace(/-/g, ' ');
+				
+				// Validate this is a real workspace with mappings
+				frappe.call({
+					method: 'moi.moi.page.stock_operations.stock_operations.get_all_workspaces_with_mappings',
+					async: false,
+					callback: function(r) {
+						if (r.message && r.message.includes(possibleWorkspace)) {
+							workspace = possibleWorkspace;
+							console.log("Step 3 - Workspace from referrer:", workspace);
+						}
+					}
+				});
+			}
+		} catch (e) {
+			console.log("Could not parse referrer:", e);
+		}
+	}
+	
+	console.log("Final detected workspace:", workspace);
+	
+	// Store workspace filters
+	let workspace_filters = {
+		item_groups: [],
+		warehouses: [],
+		workspace_name: workspace || null
+	};
 
 	// Track selected items
 	let selected_items = new Set();
@@ -20,7 +179,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			options: "Item Group",
 			change() {
 				load_items();
-			}
+			},
+			// Add query filter for workspace
+			// get_query: function() {
+			// 	if (workspace_filters.item_groups.length > 0) {
+			// 		return {
+			// 			filters: {
+			// 				name: ['in', workspace_filters.item_groups]
+			// 			}
+			// 		};
+			// 	}
+			// 	return {};
+			// }
 		}),
 		item_code: page.add_field({
 			fieldname: "item_code",
@@ -29,7 +199,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			options: "Item",
 			change() {
 				load_items();
-			}
+			},
+			// Filter items based on workspace item groups
+			// get_query: function() {
+			// 	if (workspace_filters.item_groups.length > 0) {
+			// 		return {
+			// 			filters: {
+			// 				item_group: ['in', workspace_filters.item_groups]
+			// 			}
+			// 		};
+			// 	}
+			// 	return {};
+			// }
 		}),
 		barcode: page.add_field({
 			fieldname: "barcode",
@@ -41,60 +222,113 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 		})
 	};
 
-		const labels = {
-			en: {
-				item_code: "Item Code",
-				item_name: "Item Name",
-				barcode: "Barcode",
-				balance_qty: "Balance Qty",		
-				expired_qty: "Expired Qty",
-            	actions: "Actions",
-				add: "Add",
-				issue: "Issue",
-				transfer: "Transfer",
-				print_barcode: "Print Barcode",
-				items_selected_label: "item(s) selected",
-				//for dialog box translation
-				create: "Create",
-				bulk: "Bulk",
-        		items: "Items",
-				item: "Item",
-				//for print barcode dialog box
-				print: "Print",
-				print_barcode_label : "Number Of Copies",
-				print_barcode_table_title : "Print Barcode",
-				//other msgprint and alert translation
-				all_condition_validation: "All rows must have Quantity, UOM, and Price",
-				valid_number_of_copies: "Please enter a valid number of copies",
-				no_barcode_found: "No barcode found for this item",
-				stock_entry_submit_success: "Stock Entry {0} submitted successfully",
-				stock_entry_draft_created: "Stock Entry {0} created in draft",
-				creating_stock_entry: "Creating Stock Entry...",
-				head_department: "Head Department",
-				division: "Division",
+	// Load workspace filters if workspace parameter exists
+	if (workspace) {
+		page.set_title_sub(`Workspace: ${workspace}`);
+		
+		frappe.call({
+			method: 'moi.moi.page.stock_operations.stock_operations.get_workspace_filters',
+			args: { workspace: workspace },
+			callback: function(r) {
+				console.log("Response from get_workspace_filters:", r);
+				
+				if (r.message && r.message.success) {
+					workspace_filters.item_groups = r.message.item_groups || [];
+					workspace_filters.warehouses = r.message.warehouses || [];
+					
+					console.log("Loaded workspace filters:", workspace_filters);
+					
+					// Show notification
+					let message = user_lang.startsWith("ar") 
+						? `تم تطبيق فلتر المستودع: ${r.message.item_groups.length} مجموعات أصناف`
+						: `Workspace filter applied: ${r.message.item_groups.length} item groups`;
+					
+					frappe.show_alert({
+						message: message,
+						indicator: 'green'
+					}, 5);
+					
+					// Auto-set the first item group if available
+					if (workspace_filters.item_groups.length > 0) {
+						filters.item_group.set_value(workspace_filters.item_groups[0]);
+					}
+					
+					// Load items with workspace filter
+					load_items();
+				} else {
+					console.log("No item group mapping found for workspace:", workspace);
+					frappe.show_alert({
+						message: r.message?.message || 'No filters found for this workspace',
+						indicator: 'orange'
+					}, 5);
+					
+					// Still load items without filter
+					load_items();
+				}
 			},
-			ar: {
-            item_code: "رمز الصنف",
-            item_name: "اسم الصنف",
-            barcode: "الباركود",
-            balance_qty: "الكمية المتوفرة",
-            expired_qty: "الكمية المنتهية",
-            actions: "الإجراءات",
+			error: function(err) {
+				console.error("Error loading workspace filters:", err);
+				// Load items anyway
+				load_items();
+			}
+		});
+	} else {
+		// No workspace parameter, load items normally
+		load_items();
+	}
+	
+	// ========================================
+	// WORKSPACE FILTER FUNCTIONALITY - END
+	// ========================================
+
+	const labels = {
+		en: {
+			item_code: "Item Code",
+			item_name: "Item Name",
+			barcode: "Barcode",
+			balance_qty: "Balance Qty",		
+			expired_qty: "Expired Qty",
+			actions: "Actions",
+			add: "Add",
+			issue: "Issue",
+			transfer: "Transfer",
+			print_barcode: "Print Barcode",
+			items_selected_label: "item(s) selected",
+			create: "Create",
+			bulk: "Bulk",
+			items: "Items",
+			item: "Item",
+			print: "Print",
+			print_barcode_label : "Number Of Copies",
+			print_barcode_table_title : "Print Barcode",
+			all_condition_validation: "All rows must have Quantity, UOM, and Price",
+			valid_number_of_copies: "Please enter a valid number of copies",
+			no_barcode_found: "No barcode found for this item",
+			stock_entry_submit_success: "Stock Entry {0} submitted successfully",
+			stock_entry_draft_created: "Stock Entry {0} created in draft",
+			creating_stock_entry: "Creating Stock Entry...",
+			head_department: "Head Department",
+			division: "Division",
+		},
+		ar: {
+			item_code: "رمز الصنف",
+			item_name: "اسم الصنف",
+			barcode: "الباركود",
+			balance_qty: "الكمية المتوفرة",
+			expired_qty: "الكمية المنتهية",
+			actions: "الإجراءات",
 			add: "إضافة",
-            issue: "صرف",
-            transfer: "تحويل",
-            print_barcode: "طباعة الباركود",
+			issue: "صرف",
+			transfer: "تحويل",
+			print_barcode: "طباعة الباركود",
 			items_selected_label: "تم تحديد عنصر",
-			//for dialog box translation
 			create: "إنشاء",
 			bulk: "عمليات جماعية",
-        	items: "عناصر",
+			items: "عناصر",
 			item: "صنف",
-			//for print barcode dialog box
 			print: "طباعة",
 			print_barcode_label : "عدد النسخ",
 			print_barcode_table_title : "طباعة الباركود",
-			//other msgprint and alert translation
 			all_condition_validation: "يجب أن تحتوي جميع الصفوف على الكمية ووحدة القياس والسعر",
 			valid_number_of_copies: "يرجى إدخال عدد نسخ صالح",
 			no_barcode_found : "لم يتم العثور على باركود لهذا العنصر",
@@ -104,10 +338,10 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			head_department: "رئيس القسم",
 			division: "شعبة",
 		}	
-		
-		};
-		//setting the users default language as label's language.
-		const table_lang = user_lang.startsWith("ar") ? labels.ar : labels.en;
+	};
+	
+	//setting the users default language as label's language.
+	const table_lang = user_lang.startsWith("ar") ? labels.ar : labels.en;
 
 	// --- Bulk Action Toolbar ---
 	let $bulk_toolbar = $(`
@@ -149,13 +383,21 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 	});
 
 	function load_items() {
+		// Pass workspace to backend if available
+		let args = {
+			item_group: filters.item_group.get_value(),
+			item_code: filters.item_code.get_value(),
+			barcode: filters.barcode.get_value()
+		};
+		
+		// Add workspace filter if available
+		if (workspace_filters.workspace_name) {
+			args.workspace = workspace_filters.workspace_name;
+		}
+		
 		frappe.call({
 			method: 'moi.moi.page.stock_operations.stock_operations.get_items',
-			args: {
-				item_group: filters.item_group.get_value(),
-				item_code: filters.item_code.get_value(),
-				barcode: filters.barcode.get_value()
-			},
+			args: args,
 			callback: function (r) {
 				if (r.message) {
 					render_table(r.message);
@@ -175,11 +417,11 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 							<input type="checkbox" id="select-all-checkbox" />
 						</th>
 					<th>${table_lang.item_code}</th>
-                    <th>${table_lang.item_name}</th>
-                    <th>${table_lang.barcode}</th>
-                    <th>${table_lang.balance_qty}</th>
-                    <th>${table_lang.expired_qty}</th>
-                    <th>${table_lang.actions}</th>
+					<th>${table_lang.item_name}</th>
+					<th>${table_lang.barcode}</th>
+					<th>${table_lang.balance_qty}</th>
+					<th>${table_lang.expired_qty}</th>
+					<th>${table_lang.actions}</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -223,14 +465,14 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 		update_row_buttons_state();
 	}
 
-    // helper function
-    function t(key, args = []) {
-    let text = table_lang[key] || key;
-    args.forEach((val, i) => {
-        text = text.replace(`{${i}}`, val);
-    });
-    return text;
-    }
+	// helper function
+	function t(key, args = []) {
+		let text = table_lang[key] || key;
+		args.forEach((val, i) => {
+			text = text.replace(`{${i}}`, val);
+		});
+		return text;
+	}
 
 	function bind_checkbox_events() {
 		// Select All checkbox
@@ -323,9 +565,11 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 				if (!r.message) return;
 				let items_data = r.message;
 
-				// Auto-fetch warehouse from selected item group
-				let item_group = filters.item_group.get_value() || null;
+				// Auto-fetch warehouse from workspace or selected item group
+				let item_group = filters.item_group.get_value() || 
+								(workspace_filters.item_groups.length > 0 ? workspace_filters.item_groups[0] : null);
 				let default_warehouse = '';
+				
 				if (item_group) {
 					frappe.call({
 						method: 'moi.moi.page.stock_operations.stock_operations.get_mapping_by_item_group',
@@ -345,7 +589,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 						fieldtype: 'Link',
 						options: 'Warehouse',
 						reqd: 1,
-						default: default_warehouse
+						default: default_warehouse,
+						// Filter warehouses by workspace if available
+						get_query: function() {
+							if (workspace_filters.warehouses.length > 0) {
+								return {
+									filters: {
+										name: ['in', workspace_filters.warehouses]
+									}
+								};
+							}
+							return {};
+						}
 					}
 				];
 
@@ -355,7 +610,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 						fieldname: 'target_warehouse',
 						fieldtype: 'Link',
 						options: 'Warehouse',
-						reqd: 1
+						reqd: 1,
+						// Filter target warehouses by workspace if available
+						get_query: function() {
+							if (workspace_filters.warehouses.length > 0) {
+								return {
+									filters: {
+										name: ['in', workspace_filters.warehouses]
+									}
+								};
+							}
+							return {};
+						}
 					});
 				}
 
@@ -585,7 +851,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 		});
 	}
 
-
 	function get_translated_type(type) {
 		const user_lang = frappe.boot.user.language || frappe.boot.lang || "en";
 
@@ -646,7 +911,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 					fieldtype: 'Link',
 					options: 'Warehouse',
 					default: warehouse,
-					reqd: 1
+					reqd: 1,
+					// Filter warehouses by workspace if available
+					get_query: function() {
+						if (workspace_filters.warehouses.length > 0) {
+							return {
+								filters: {
+									name: ['in', workspace_filters.warehouses]
+								}
+							};
+						}
+						return {};
+					}
 				});
 
 				// Add Transfer-specific field
@@ -656,7 +932,18 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 						fieldname: 'target_warehouse',
 						fieldtype: 'Link',
 						options: 'Warehouse',
-						reqd: 1
+						reqd: 1,
+						// Filter target warehouses by workspace if available
+						get_query: function() {
+							if (workspace_filters.warehouses.length > 0) {
+								return {
+									filters: {
+										name: ['in', workspace_filters.warehouses]
+									}
+								};
+							}
+							return {};
+						}
 					});
 				}
 
@@ -709,7 +996,6 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 							};
 						}
 					});
-
 				}
 
 				fields.push({
@@ -947,6 +1233,4 @@ frappe.pages['stock-operations'].on_page_load = function (wrapper) {
 			}
 		});
 	}
-
-	load_items();
 };
