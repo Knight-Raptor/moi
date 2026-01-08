@@ -495,14 +495,29 @@ def make_stock_entry(item_code, qty, price, warehouse, type, posting_date=None,
     
     # Prepare item details
     item_dict = {
+
         "item_code": item_code,
-        "qty": stock_qty,  # Stock quantity
-        "basic_rate": flt(price) / flt(conversion_factor) if conversion_factor else flt(price),  # Rate per stock UOM
-        "conversion_factor": conversion_factor,
-        "transfer_qty": stock_qty,
+
+        "qty": flt(qty),                 # user-entered qty
+
         "uom": uom or stock_uom,
-        "stock_uom": stock_uom
+
+        "stock_uom": stock_uom,
+
+        "conversion_factor": conversion_factor,
+
+        "basic_rate": flt(price)         # rate per Box
+
     }
+    # item_dict = {
+    #     "item_code": item_code,
+    #     "qty": stock_qty,  # Stock quantity
+    #     "basic_rate": flt(price) / flt(conversion_factor) if conversion_factor else flt(price),  # Rate per stock UOM
+    #     "conversion_factor": conversion_factor,
+    #     "transfer_qty": stock_qty,
+    #     "uom": uom or stock_uom,
+    #     "stock_uom": stock_uom
+    # }
     
     # Handle batch operations
     if batch_id and manufacturing_date:
